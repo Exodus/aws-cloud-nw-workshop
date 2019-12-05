@@ -1,0 +1,169 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: ''
+Parameters:
+  ami:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+Resources:
+  vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.8.0.0/16"
+      InstanceTenancy: default
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: !Ref AWS::StackName
+  subnetFirst:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.8.0.0/24
+      AvailabilityZone: !Select ['0', !GetAZs '']
+      VpcId: !Ref vpc
+      Tags:
+      - Key: Name
+        Value: public-first
+  subnetSecond:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: 10.8.1.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      VpcId: !Ref vpc
+      Tags:
+      - Key: Name
+        Value: public-second
+  inetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties: {}
+  dhcpOptions:
+    Type: AWS::EC2::DHCPOptions
+    Properties:
+      DomainName: gorillalogic.lab
+      DomainNameServers:
+      - AmazonProvidedDNS
+  routeTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId:
+        Ref: vpc
+  gw1:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId:
+        Ref: vpc
+      InternetGatewayId:
+        Ref: inetGateway
+  subnetFirstRoute:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: routeTable
+      SubnetId:
+        Ref: subnetFirst
+  subnetSecondRoute:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId:
+        Ref: routeTable
+      SubnetId:
+        Ref: subnetSecond
+  route:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      RouteTableId:
+        Ref: routeTable
+      GatewayId:
+        Ref: inetGateway
+    DependsOn: gw1
+  dhcpOptionsAssociation:
+    Type: AWS::EC2::VPCDHCPOptionsAssociation
+    Properties:
+      VpcId:
+        Ref: vpc
+      DhcpOptionsId:
+        Ref: dhcpOptions
+  bastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Bastion Security Group
+      VpcId:
+        Ref: vpc
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+  eip:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref bastion
+      Domain: vpc
+  bastion:
+    Type: AWS::EC2::Instance
+    # CreationPolicy:
+    #   ResourceSignal:
+    #     Count: 1
+    #     Timeout: PT12M
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      ImageId: !Ref ami
+      InstanceType: t2.micro
+      InstanceInitiatedShutdownBehavior: stop
+      Monitoring: false
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: true
+        DeleteOnTermination: true
+        Description: String
+        DeviceIndex: '0'
+        GroupSet: [!Ref 'bastionSG']
+        SubnetId: !Ref subnetFirst
+      UserData:
+        Fn::Base64:
+          |
+            #cloud-config
+            repo_update: true
+            repo_upgrade: all
+
+            packages:
+              - httpd
+            
+            runcmd:
+              - [ systemctl, enable, httpd ]
+              - [ systemctl, start, httpd ]
+      Tags:
+      - Key: Name
+        Value: !Join [-, [!Ref 'AWS::StackName', 'bastion']]
+      - Key: stack
+        Value: !Ref 'AWS::StackName'
+      BlockDeviceMappings:
+      - DeviceName: '/dev/xvda'
+        Ebs:
+          DeleteOnTermination: true
+          VolumeSize: 50
+          VolumeType: 'gp2'
+Outputs:
+  bastion:
+    Description: Public IP of the bastion
+    Value: !Ref eip
+  bastionSg:
+    Description: Security Group ID used by the bastion
+    Value: !Ref bastionSG
+  subnets:
+    Description: The created subnets
+      to all servers in this VPC
+    Value: !Join [",", [!Ref subnetFirst, !Ref subnetSecond]]
+  subnetFirst:
+    Description: 1st Subnet
+    Value: !Ref subnetFirst
+  subnetSecond:
+    Description: 2nd Subnet
+    Value: !Ref subnetSecond
+  region:
+    Description: The deployed region
+    Value: !Ref AWS::Region
+  vpc:
+    Description: The VPC ID
+    Value: !Ref vpc
